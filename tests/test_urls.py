@@ -1,4 +1,4 @@
-from app.bot import valid_url
+from app.validation import valid_url
 
 
 def test_valid_url():

@@ -1,37 +1,71 @@
 # Telegram Downloader Bot
 
-A modular Telegram media downloader built around yt-dlp and an S3-compatible object-storage adapter.
+A modular Telegram media downloader for URLs supported by yt-dlp, with selectable source formats and S3-compatible object storage.
 
-## Flow
+## Architecture
 
-1. User sends an HTTP(S) media URL.
-2. yt-dlp extracts metadata and available video formats without downloading.
-3. The bot presents detected video heights as inline buttons.
-4. The selected format is downloaded to temporary/local storage.
-5. The resulting file is uploaded through the S3-compatible storage adapter.
-6. The bot returns a presigned download URL.
+`Telegram → URL validation → yt-dlp inspection → format selection → persistent SQLite job queue → worker → local/temporary file → S3-compatible storage → download URL`
+
+The bot does not bypass DRM, authentication, geo restrictions, or other access controls. Use it only with media you are authorized to download.
+
+## Features
+
+- Automatic yt-dlp extractor selection.
+- Metadata and available video formats inspected before download.
+- Quality buttons generated from formats actually exposed by the source.
+- Video-only formats can be paired with the best available audio stream.
+- Persistent SQLite job records with recovery after process restart.
+- Configurable worker concurrency and per-user active-job limits.
+- Retry and continued-download options delegated to yt-dlp.
+- FFmpeg support for merging and post-processing.
+- S3-compatible upload adapter with optional public URL or presigned URL.
+- Local-file cleanup after successful upload.
+- Docker image with FFmpeg included.
+- Ruff + pytest + Docker build validation in GitHub Actions.
 
 ## Setup
 
-Requires Python 3.11+ and FFmpeg.
+Python 3.11+ and FFmpeg are required for local execution.
 
 ```bash
 python -m venv .venv
+# Windows
 .venv\\Scripts\\activate
-pip install .
-copy .env.example .env
+# Linux/macOS
+# source .venv/bin/activate
+pip install '.[dev]'
+copy .env.example .env  # Windows
+# cp .env.example .env  # Linux/macOS
 ```
 
-Fill `TELEGRAM_BOT_TOKEN` and the storage credentials in `.env`, then:
+Set `TELEGRAM_BOT_TOKEN` and all required storage variables in `.env`.
 
 ```bash
 python -m app.main
 ```
 
+## Docker
+
+```bash
+docker build -t downloader-bot .
+docker run --env-file .env -v downloader-data:/app/data -v downloader-downloads:/app/downloads -v downloader-tmp:/app/tmp downloader-bot
+```
+
 ## Storage
 
-The storage adapter uses the S3 API, so an S3-compatible provider can be configured with endpoint, bucket, access key and secret key. Keep credentials only in environment variables; never commit `.env`.
+`app/storage.py` uses the S3 API. Configure endpoint, bucket, credentials and expiration through environment variables. If `STORAGE_PUBLIC_BASE_URL` is set, the bot returns that object's public URL; otherwise it creates a presigned `GetObject` URL.
 
-## Notes
+## Job lifecycle
 
-Format availability is source-dependent. DRM-protected, login-only, geo-restricted, or otherwise inaccessible media may not be downloadable. The bot does not attempt to bypass DRM or access controls. Use it only for content you are authorized to download.
+`inspecting → pending → queued → downloading → uploading → completed`
+
+Failures are recorded as `failed`. Jobs interrupted while downloading/uploading are returned to `queued` on restart so the worker can retry them.
+
+## Testing
+
+```bash
+pytest -q
+ruff check app tests
+```
+
+CI runs both commands and builds the Docker image.

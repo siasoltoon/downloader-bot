@@ -1,5 +1,6 @@
-import aiosqlite
 from pathlib import Path
+
+import aiosqlite
 
 
 class Database:
@@ -28,7 +29,10 @@ class Database:
 
     async def create_job(self, user_id: int, chat_id: int, url: str, status: str = "queued") -> int:
         async with aiosqlite.connect(self.path) as db:
-            cur = await db.execute("INSERT INTO jobs(user_id,chat_id,url,status) VALUES(?,?,?,?)", (user_id, chat_id, url, status))
+            cur = await db.execute(
+                "INSERT INTO jobs(user_id,chat_id,url,status) VALUES(?,?,?,?)",
+                (user_id, chat_id, url, status),
+            )
             await db.commit()
             return int(cur.lastrowid)
 
@@ -39,7 +43,10 @@ class Database:
             return await cur.fetchone()
 
     async def update_job(self, job_id: int, **fields) -> None:
-        allowed = {"chat_id", "message_id", "title", "format_id", "status", "file_path", "storage_key", "download_url", "error", "attempts"}
+        allowed = {
+            "chat_id", "message_id", "title", "format_id", "status", "file_path",
+            "storage_key", "download_url", "error", "attempts",
+        }
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"Unsupported job fields: {sorted(unknown)}")
@@ -48,7 +55,10 @@ class Database:
         assignments = [f"{key}=?" for key in fields]
         values = list(fields.values()) + [job_id]
         async with aiosqlite.connect(self.path) as db:
-            await db.execute(f"UPDATE jobs SET {', '.join(assignments)}, updated_at=CURRENT_TIMESTAMP WHERE id=?", values)
+            await db.execute(
+                f"UPDATE jobs SET {', '.join(assignments)}, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                values,
+            )
             await db.commit()
 
     async def list_queued_jobs(self):
@@ -59,10 +69,17 @@ class Database:
 
     async def recover_interrupted_jobs(self):
         async with aiosqlite.connect(self.path) as db:
-            await db.execute("UPDATE jobs SET status='queued', error='Recovered after application restart', updated_at=CURRENT_TIMESTAMP WHERE status IN ('downloading','uploading')")
+            await db.execute(
+                "UPDATE jobs SET status='queued', error='Recovered after application restart', "
+                "updated_at=CURRENT_TIMESTAMP WHERE status IN ('downloading','uploading')"
+            )
             await db.commit()
 
     async def count_user_active_jobs(self, user_id: int) -> int:
         async with aiosqlite.connect(self.path) as db:
-            cur = await db.execute("SELECT COUNT(*) FROM jobs WHERE user_id=? AND status IN ('queued','downloading','uploading','inspecting')", (user_id,))
+            cur = await db.execute(
+                "SELECT COUNT(*) FROM jobs WHERE user_id=? "
+                "AND status IN ('queued','downloading','uploading','inspecting')",
+                (user_id,),
+            )
             return int((await cur.fetchone())[0])

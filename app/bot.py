@@ -112,7 +112,7 @@ async def choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await DB.update_job(job_id, status="queued", format_id=option.expression)
         await q.edit_message_text(f"⏳ Job #{job_id} queued…")
         await _QUEUE.put(job_id)
-    except Exception:
+    except RuntimeError:
         await DB.update_job(job_id, status="failed", error="Selected format unavailable")
         await q.edit_message_text("❌ The selected format is no longer available.")
 

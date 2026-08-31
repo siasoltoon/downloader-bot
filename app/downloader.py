@@ -1,6 +1,6 @@
 from pathlib import Path
 import yt_dlp
-from app.formats import FormatOption, collect_formats
+from app.formats import collect_formats
 
 
 class Downloader:
@@ -23,10 +23,10 @@ class Downloader:
             "formats": collect_formats(info),
         }
 
-    def download(self, url: str, option: FormatOption, job_id: int) -> Path:
+    def download(self, url: str, format_expression: str, job_id: int) -> Path:
         template = str(self.download_dir / f"{job_id}-%(title).120s.%(ext)s")
         opts = {
-            "format": option.expression,
+            "format": format_expression,
             "outtmpl": template,
             "noplaylist": True,
             "restrictfilenames": True,

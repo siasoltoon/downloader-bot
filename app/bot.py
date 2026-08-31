@@ -1,14 +1,12 @@
 import asyncio
 import logging
-from urllib.parse import urlparse
-
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
-
 from app.config import settings
 from app.database import Database
 from app.downloader import Downloader
 from app.storage import Storage
+from app.validation import valid_url
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -17,14 +15,6 @@ DL = Downloader(settings.download_dir, settings.temp_dir)
 ST = Storage(settings.storage_endpoint, settings.storage_region, settings.storage_bucket, settings.storage_access_key, settings.storage_secret_key, settings.storage_presigned_ttl, settings.storage_public_base_url)
 _QUEUE: asyncio.Queue[int] = asyncio.Queue()
 _APP: Application | None = None
-
-
-def valid_url(value: str) -> bool:
-    try:
-        p = urlparse(value)
-        return p.scheme in {"http", "https"} and bool(p.netloc) and len(value) <= 4096
-    except ValueError:
-        return False
 
 
 def size_text(n):
@@ -57,8 +47,7 @@ async def receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         info = await asyncio.to_thread(DL.inspect, url)
         options = info["formats"]
-        if not options:
-            raise RuntimeError("No downloadable video formats")
+        if not options: raise RuntimeError("No downloadable video formats")
         await DB.update_job(job_id, title=info["title"], status="pending")
         buttons = [[InlineKeyboardButton(f"{o.label} • {size_text(o.filesize)}", callback_data=f"fmt:{job_id}:{o.format_id}")] for o in options]
         await msg.edit_text(f"🎬 {info['title'][:800]}\n\nChoose a quality:", reply_markup=InlineKeyboardMarkup(buttons))
@@ -120,10 +109,8 @@ async def run_job(job_id: int):
 async def worker():
     while True:
         job_id = await _QUEUE.get()
-        try:
-            await run_job(job_id)
-        finally:
-            _QUEUE.task_done()
+        try: await run_job(job_id)
+        finally: _QUEUE.task_done()
 
 
 async def post_init(app: Application):

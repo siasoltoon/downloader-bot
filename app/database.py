@@ -1,8 +1,6 @@
 import aiosqlite
 from pathlib import Path
 
-ACTIVE = ("queued", "downloading", "uploading")
-
 
 class Database:
     def __init__(self, path: Path):
@@ -14,23 +12,12 @@ class Database:
             await db.executescript("""
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS schema_meta (version INTEGER NOT NULL);
-                INSERT INTO schema_meta(version)
-                SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
+                INSERT INTO schema_meta(version) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM schema_meta);
                 CREATE TABLE IF NOT EXISTS jobs (
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  user_id INTEGER NOT NULL,
-                  chat_id INTEGER NOT NULL,
-                  message_id INTEGER,
-                  url TEXT NOT NULL,
-                  title TEXT,
-                  format_id TEXT,
-                  status TEXT NOT NULL,
-                  file_path TEXT,
-                  storage_key TEXT,
-                  download_url TEXT,
-                  error TEXT,
-                  attempts INTEGER NOT NULL DEFAULT 0,
-                  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
+                  message_id INTEGER, url TEXT NOT NULL, title TEXT, format_id TEXT, status TEXT NOT NULL,
+                  file_path TEXT, storage_key TEXT, download_url TEXT, error TEXT,
+                  attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs(user_id);
@@ -64,13 +51,18 @@ class Database:
             await db.execute(f"UPDATE jobs SET {', '.join(assignments)}, updated_at=CURRENT_TIMESTAMP WHERE id=?", values)
             await db.commit()
 
-    async def list_recoverable_jobs(self):
+    async def list_queued_jobs(self):
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
-            cur = await db.execute("SELECT * FROM jobs WHERE status IN ('queued','downloading','uploading') ORDER BY id")
+            cur = await db.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY id")
             return await cur.fetchall()
+
+    async def recover_interrupted_jobs(self):
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute("UPDATE jobs SET status='queued', error='Recovered after application restart', updated_at=CURRENT_TIMESTAMP WHERE status IN ('downloading','uploading')")
+            await db.commit()
 
     async def count_user_active_jobs(self, user_id: int) -> int:
         async with aiosqlite.connect(self.path) as db:
-            cur = await db.execute("SELECT COUNT(*) FROM jobs WHERE user_id=? AND status IN ('queued','downloading','uploading')", (user_id,))
+            cur = await db.execute("SELECT COUNT(*) FROM jobs WHERE user_id=? AND status IN ('queued','downloading','uploading','inspecting')", (user_id,))
             return int((await cur.fetchone())[0])

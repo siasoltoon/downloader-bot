@@ -1,27 +1,49 @@
 import asyncio
 import logging
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+
 from app.config import settings
 from app.database import Database
 from app.downloader import Downloader
 from app.storage import Storage
 from app.validation import valid_url
 
-logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(
+    level=getattr(logging, settings.log_level.upper(), logging.INFO),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 log = logging.getLogger(__name__)
 DB = Database(settings.database_path)
 DL = Downloader(settings.download_dir, settings.temp_dir)
-ST = Storage(settings.storage_endpoint, settings.storage_region, settings.storage_bucket, settings.storage_access_key, settings.storage_secret_key, settings.storage_presigned_ttl, settings.storage_public_base_url)
+ST = Storage(
+    settings.storage_endpoint,
+    settings.storage_region,
+    settings.storage_bucket,
+    settings.storage_access_key,
+    settings.storage_secret_key,
+    settings.storage_presigned_ttl,
+    settings.storage_public_base_url,
+)
 _QUEUE: asyncio.Queue[int] = asyncio.Queue()
 _APP: Application | None = None
 
 
 def size_text(n):
-    if not n: return "?"
+    if not n:
+        return "?"
     n = float(n)
     for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024: return f"{n:.1f}{unit}"
+        if n < 1024:
+            return f"{n:.1f}{unit}"
         n /= 1024
     return f"{n:.1f}PB"
 
@@ -47,11 +69,23 @@ async def receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         info = await asyncio.to_thread(DL.inspect, url)
         options = info["formats"]
-        if not options: raise RuntimeError("No downloadable video formats")
+        if not options:
+            raise RuntimeError("No downloadable video formats")
         await DB.update_job(job_id, title=info["title"], status="pending")
-        buttons = [[InlineKeyboardButton(f"{o.label} • {size_text(o.filesize)}", callback_data=f"fmt:{job_id}:{o.format_id}")] for o in options]
-        await msg.edit_text(f"🎬 {info['title'][:800]}\n\nChoose a quality:", reply_markup=InlineKeyboardMarkup(buttons))
-    except Exception as exc:
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    f"{o.label} • {size_text(o.filesize)}",
+                    callback_data=f"fmt:{job_id}:{o.format_id}",
+                )
+            ]
+            for o in options
+        ]
+        await msg.edit_text(
+            f"🎬 {info['title'][:800]}\n\nChoose a quality:",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+    except Exception as exc:  # noqa: BLE001 - convert extraction errors to user-safe response
         log.exception("Extraction failed")
         await DB.update_job(job_id, status="failed", error=str(exc)[:1000])
         await msg.edit_text("❌ This URL could not be extracted or is unavailable.")
@@ -73,18 +107,20 @@ async def choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         info = await asyncio.to_thread(DL.inspect, job["url"])
         option = next((f for f in info["formats"] if f.format_id == format_id), None)
-        if option is None: raise RuntimeError("Selected format unavailable")
+        if option is None:
+            raise RuntimeError("Selected format unavailable")
         await DB.update_job(job_id, status="queued", format_id=option.expression)
         await q.edit_message_text(f"⏳ Job #{job_id} queued…")
         await _QUEUE.put(job_id)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - convert selection errors to user-safe response
         await DB.update_job(job_id, status="failed", error=str(exc)[:1000])
         await q.edit_message_text("❌ The selected format is no longer available.")
 
 
 async def run_job(job_id: int):
     job = await DB.get_job(job_id)
-    if not job: return
+    if not job:
+        return
     path = None
     try:
         await DB.update_job(job_id, status="downloading", attempts=job["attempts"] + 1)
@@ -96,21 +132,25 @@ async def run_job(job_id: int):
         link = await asyncio.to_thread(ST.upload, path, key)
         await DB.update_job(job_id, status="completed", storage_key=key, download_url=link)
         await _APP.bot.send_message(job["chat_id"], f"✅ Job #{job_id} ready\n\n{link}")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - worker must persist failures and continue
         log.exception("Job %s failed", job_id)
         await DB.update_job(job_id, status="failed", error=str(exc)[:1000])
         await _APP.bot.send_message(job["chat_id"], f"❌ Job #{job_id} failed. Please try again with another URL or format.")
     finally:
         if path and path.exists():
-            try: path.unlink()
-            except OSError: log.warning("Could not remove %s", path)
+            try:
+                path.unlink()
+            except OSError:
+                log.warning("Could not remove %s", path)
 
 
 async def worker():
     while True:
         job_id = await _QUEUE.get()
-        try: await run_job(job_id)
-        finally: _QUEUE.task_done()
+        try:
+            await run_job(job_id)
+        finally:
+            _QUEUE.task_done()
 
 
 async def post_init(app: Application):

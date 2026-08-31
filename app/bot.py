@@ -85,9 +85,9 @@ async def receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎬 {info['title'][:800]}\n\nChoose a quality:",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
-    except Exception as exc:  # noqa: BLE001 - convert extraction errors to user-safe response
+    except Exception:
         log.exception("Extraction failed")
-        await DB.update_job(job_id, status="failed", error=str(exc)[:1000])
+        await DB.update_job(job_id, status="failed", error="Extraction failed")
         await msg.edit_text("❌ This URL could not be extracted or is unavailable.")
 
 
@@ -112,8 +112,8 @@ async def choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await DB.update_job(job_id, status="queued", format_id=option.expression)
         await q.edit_message_text(f"⏳ Job #{job_id} queued…")
         await _QUEUE.put(job_id)
-    except Exception as exc:  # noqa: BLE001 - convert selection errors to user-safe response
-        await DB.update_job(job_id, status="failed", error=str(exc)[:1000])
+    except Exception:
+        await DB.update_job(job_id, status="failed", error="Selected format unavailable")
         await q.edit_message_text("❌ The selected format is no longer available.")
 
 
@@ -132,9 +132,9 @@ async def run_job(job_id: int):
         link = await asyncio.to_thread(ST.upload, path, key)
         await DB.update_job(job_id, status="completed", storage_key=key, download_url=link)
         await _APP.bot.send_message(job["chat_id"], f"✅ Job #{job_id} ready\n\n{link}")
-    except Exception as exc:  # noqa: BLE001 - worker must persist failures and continue
+    except Exception:
         log.exception("Job %s failed", job_id)
-        await DB.update_job(job_id, status="failed", error=str(exc)[:1000])
+        await DB.update_job(job_id, status="failed", error="Download or upload failed")
         await _APP.bot.send_message(job["chat_id"], f"❌ Job #{job_id} failed. Please try again with another URL or format.")
     finally:
         if path and path.exists():

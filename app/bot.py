@@ -1,39 +1,43 @@
 import asyncio
-import os
+import logging
 from urllib.parse import urlparse
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import (
-    Application, CallbackQueryHandler, CommandHandler, ContextTypes,
-    MessageHandler, filters,
-)
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.config import settings
 from app.database import Database
 from app.downloader import Downloader
 from app.storage import Storage
 
+logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger(__name__)
 DB = Database(settings.database_path)
 DL = Downloader(settings.download_dir, settings.temp_dir)
-ST = Storage(
-    settings.storage_endpoint, settings.storage_region, settings.storage_bucket,
-    settings.storage_access_key, settings.storage_secret_key, settings.storage_presigned_ttl,
-)
-JOB_LIMIT = asyncio.Semaphore(max(1, settings.max_workers))
+ST = Storage(settings.storage_endpoint, settings.storage_region, settings.storage_bucket, settings.storage_access_key, settings.storage_secret_key, settings.storage_presigned_ttl, settings.storage_public_base_url)
+_QUEUE: asyncio.Queue[int] = asyncio.Queue()
+_APP: Application | None = None
 
 
 def valid_url(value: str) -> bool:
     try:
-        parsed = urlparse(value)
-        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+        p = urlparse(value)
+        return p.scheme in {"http", "https"} and bool(p.netloc) and len(value) <= 4096
     except ValueError:
         return False
 
 
+def size_text(n):
+    if not n: return "?"
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024: return f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}PB"
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Send a supported media URL. I will inspect it and show the available video qualities."
-    )
+    await update.message.reply_text("Send a supported media URL and I will show the available qualities.")
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -45,103 +49,92 @@ async def receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = (update.message.text or "").strip()
     if not valid_url(url):
         return await update.message.reply_text("Please send a valid HTTP(S) URL.")
-
-    active = await DB.count_user_active_jobs(update.effective_user.id)
-    if active >= settings.max_active_jobs_per_user:
+    if await DB.count_user_active_jobs(update.effective_user.id) >= settings.max_active_jobs_per_user:
         return await update.message.reply_text("You have reached the active-job limit. Try again later.")
-
-    pending_id = await DB.create_job(update.effective_user.id, update.effective_chat.id, url)
     msg = await update.message.reply_text("🔎 Inspecting URL and available formats…")
-    await DB.update_job(pending_id, message_id=msg.message_id, status="inspecting")
-
+    job_id = await DB.create_job(update.effective_user.id, update.effective_chat.id, url, "inspecting")
+    await DB.update_job(job_id, message_id=msg.message_id)
     try:
         info = await asyncio.to_thread(DL.inspect, url)
+        options = info["formats"]
+        if not options:
+            raise RuntimeError("No downloadable video formats")
+        await DB.update_job(job_id, title=info["title"], status="pending")
+        buttons = [[InlineKeyboardButton(f"{o.label} • {size_text(o.filesize)}", callback_data=f"fmt:{job_id}:{o.format_id}")] for o in options]
+        await msg.edit_text(f"🎬 {info['title'][:800]}\n\nChoose a quality:", reply_markup=InlineKeyboardMarkup(buttons))
     except Exception as exc:
-        await DB.update_job(pending_id, status="failed", error=str(exc)[:1000])
-        return await msg.edit_text(f"❌ Could not extract this URL.\n{type(exc).__name__}")
-
-    await DB.update_job(pending_id, title=info["title"], status="pending")
-    buttons = []
-    for option in info["formats"]:
-        suffix = " + audio" if not option.has_audio else ""
-        buttons.append([InlineKeyboardButton(
-            f"{option.label}{suffix}", callback_data=f"fmt:{pending_id}:{option.format_id}"
-        )])
-    if not buttons:
-        await DB.update_job(pending_id, status="failed", error="No video formats")
-        return await msg.edit_text("No downloadable video formats were found.")
-
-    title = info["title"][:800]
-    await msg.edit_text(f"🎬 {title}\n\nChoose a quality:", reply_markup=InlineKeyboardMarkup(buttons))
+        log.exception("Extraction failed")
+        await DB.update_job(job_id, status="failed", error=str(exc)[:1000])
+        await msg.edit_text("❌ This URL could not be extracted or is unavailable.")
 
 
 async def choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    q = update.callback_query
+    await q.answer()
     try:
-        _, job_text, format_id = query.data.split(":", 2)
+        _, job_text, format_id = q.data.split(":", 2)
         job_id = int(job_text)
     except (ValueError, AttributeError):
-        return await query.edit_message_text("Invalid selection.")
-
+        return await q.edit_message_text("Invalid selection.")
     job = await DB.get_job(job_id)
-    if not job or job["user_id"] != query.from_user.id or job["status"] != "pending":
-        return await query.edit_message_text("This selection has expired. Send the URL again.")
-
+    if not job or job["user_id"] != q.from_user.id or job["status"] != "pending":
+        return await q.edit_message_text("This selection has expired. Send the URL again.")
+    if await DB.count_user_active_jobs(q.from_user.id) >= settings.max_active_jobs_per_user:
+        return await q.edit_message_text("You have reached the active-job limit.")
     try:
         info = await asyncio.to_thread(DL.inspect, job["url"])
         option = next((f for f in info["formats"] if f.format_id == format_id), None)
-        if option is None:
-            raise RuntimeError("Selected format is no longer available")
+        if option is None: raise RuntimeError("Selected format unavailable")
+        await DB.update_job(job_id, status="queued", format_id=option.expression)
+        await q.edit_message_text(f"⏳ Job #{job_id} queued…")
+        await _QUEUE.put(job_id)
     except Exception as exc:
         await DB.update_job(job_id, status="failed", error=str(exc)[:1000])
-        return await query.edit_message_text("❌ The selected format is no longer available.")
-
-    await DB.update_job(job_id, status="queued", format_id=option.expression)
-    await query.edit_message_text("⏳ Job queued…")
-    asyncio.create_task(run_job(job_id))
+        await q.edit_message_text("❌ The selected format is no longer available.")
 
 
 async def run_job(job_id: int):
     job = await DB.get_job(job_id)
-    if not job:
-        return
+    if not job: return
+    path = None
     try:
         await DB.update_job(job_id, status="downloading", attempts=job["attempts"] + 1)
-        async with JOB_LIMIT:
-            path = await asyncio.to_thread(DL.download, job["url"], job["format_id"], job_id)
-            if path.stat().st_size > settings.max_file_size_mb * 1024 * 1024:
-                raise RuntimeError("File exceeds configured maximum size")
-            await DB.update_job(job_id, status="uploading", file_path=str(path))
-            key = f"downloads/{job_id}/{path.name}"
-            link = await asyncio.to_thread(ST.upload, path, key)
-            await DB.update_job(job_id, status="completed", storage_key=key, download_url=link)
-            await send_result(job["chat_id"], link)
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        path = await asyncio.to_thread(DL.download, job["url"], job["format_id"], job_id)
+        if path.stat().st_size > settings.max_file_size_mb * 1024 * 1024:
+            raise RuntimeError("File exceeds configured maximum size")
+        await DB.update_job(job_id, status="uploading", file_path=str(path))
+        key = f"downloads/{job_id}/{path.name}"
+        link = await asyncio.to_thread(ST.upload, path, key)
+        await DB.update_job(job_id, status="completed", storage_key=key, download_url=link)
+        await _APP.bot.send_message(job["chat_id"], f"✅ Job #{job_id} ready\n\n{link}")
     except Exception as exc:
+        log.exception("Job %s failed", job_id)
         await DB.update_job(job_id, status="failed", error=str(exc)[:1000])
-        await send_result(job["chat_id"], f"❌ Download failed: {type(exc).__name__}")
+        await _APP.bot.send_message(job["chat_id"], f"❌ Job #{job_id} failed. Please try again with another URL or format.")
+    finally:
+        if path and path.exists():
+            try: path.unlink()
+            except OSError: log.warning("Could not remove %s", path)
 
 
-async def send_result(chat_id: int, text: str):
-    # Stored application instance is injected by post_init.
-    if _APP is not None:
-        await _APP.bot.send_message(chat_id=chat_id, text=text)
-
-
-_APP: Application | None = None
+async def worker():
+    while True:
+        job_id = await _QUEUE.get()
+        try:
+            await run_job(job_id)
+        finally:
+            _QUEUE.task_done()
 
 
 async def post_init(app: Application):
     global _APP
     _APP = app
     await DB.init()
-    # Jobs interrupted by a process restart are made visible as failed rather than left hanging.
-    for job in await DB.list_active_jobs():
-        await DB.update_job(job["id"], status="failed", error="Interrupted by application restart")
+    await DB.recover_interrupted_jobs()
+    for _ in range(max(1, settings.max_workers)):
+        app.create_task(worker())
+    for job in await DB.list_queued_jobs():
+        await _QUEUE.put(job["id"])
 
 
 def build_app() -> Application:

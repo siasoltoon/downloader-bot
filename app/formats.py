@@ -4,7 +4,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class FormatOption:
     format_id: str
-    height: int | None
+    height: int
     fps: float | None
     ext: str
     has_audio: bool
@@ -15,29 +15,22 @@ class FormatOption:
 
 
 def collect_formats(info: dict) -> list[FormatOption]:
-    """Build a clean, deduplicated list of practical video choices."""
-    formats = info.get("formats", [])
-    audio_formats = [f for f in formats if f.get("acodec") not in (None, "none")]
-    best_audio = max(audio_formats, key=lambda f: (f.get("abr") or 0, f.get("tbr") or 0), default=None)
-    best: dict[int, tuple[tuple, FormatOption]] = {}
-
-    for raw in formats:
-        height = raw.get("height")
-        if not raw.get("vcodec") or raw.get("vcodec") == "none" or not height:
+    formats = info.get("formats") or []
+    audio = [f for f in formats if f.get("acodec") not in (None, "none")]
+    best_audio = max(audio, key=lambda f: (f.get("abr") or 0, f.get("tbr") or 0, f.get("filesize") or f.get("filesize_approx") or 0), default=None)
+    best: dict[int, FormatOption] = {}
+    for f in formats:
+        height = f.get("height")
+        if not isinstance(height, int) or height <= 0 or f.get("vcodec") in (None, "none"):
             continue
-        if height < 1 or height > 4320:
-            continue
-        has_audio = raw.get("acodec") not in (None, "none")
-        expression = str(raw["format_id"])
-        if not has_audio and best_audio:
-            expression = f"{raw['format_id']}+{best_audio['format_id']}"
-        size = raw.get("filesize") or raw.get("filesize_approx")
-        option = FormatOption(
-            str(raw["format_id"]), height, raw.get("fps"), raw.get("ext", ""),
-            has_audio, True, size, f"{height}p", expression,
-        )
-        score = (1 if has_audio else 0, raw.get("fps") or 0, raw.get("tbr") or 0, size or 0)
-        if height not in best or score > best[height][0]:
-            best[height] = (score, option)
-
-    return [item[1] for item in sorted(best.values(), key=lambda x: x[1].height or 0)]
+        has_audio = f.get("acodec") not in (None, "none")
+        fid = str(f.get("format_id"))
+        expression = fid if has_audio or best_audio is None else f"{fid}+{best_audio.get('format_id')}"
+        size = f.get("filesize") or f.get("filesize_approx")
+        option = FormatOption(fid, height, f.get("fps"), f.get("ext") or "", has_audio, True, size, f"{height}p", expression)
+        score = (1 if has_audio else 0, f.get("tbr") or 0, size or 0, f.get("fps") or 0)
+        old = best.get(height)
+        old_score = (-1, 0, 0, 0) if old is None else (1 if old.has_audio else 0, 0, old.filesize or 0, old.fps or 0)
+        if old is None or score > old_score:
+            best[height] = option
+    return sorted(best.values(), key=lambda x: x.height)

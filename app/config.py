@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     max_file_size_mb: int = 2048
     max_download_seconds: int = 3600
     storage_endpoint: str = ""
-    storage_region: str = "auto"
+    storage_region: str = "eu-west-1"
     storage_bucket: str = ""
     storage_access_key: str = ""
     storage_secret_key: str = ""

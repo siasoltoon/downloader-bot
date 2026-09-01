@@ -1,4 +1,5 @@
 import logging
+import mimetypes
 import time
 from pathlib import Path
 
@@ -23,17 +24,20 @@ class Storage:
         self.bucket = bucket
         self.ttl = ttl
         self.public_base_url = public_base_url.rstrip("/")
+        self.region = region or "eu-west-1"
+        self.endpoint = endpoint
         self.client = boto3.client(
             "s3",
             endpoint_url=endpoint or None,
-            region_name=region or None,
+            region_name=self.region,
             aws_access_key_id=access_key or None,
             aws_secret_access_key=secret_key or None,
         )
         log.info(
-            "storage:init bucket=%s region=%s presigned_ttl=%ss public_base_url=%s",
+            "storage:init bucket=%s endpoint=%s region=%s presigned_ttl=%ss public_base_url=%s",
             self.bucket,
-            region or "default",
+            self.endpoint or "default",
+            self.region,
             self.ttl,
             bool(self.public_base_url),
         )
@@ -41,9 +45,21 @@ class Storage:
     def upload(self, path: Path, key: str) -> str:
         started = time.monotonic()
         size = path.stat().st_size
-        log.info("storage:upload:start bucket=%s key=%s size=%d", self.bucket, key, size)
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        log.info(
+            "storage:upload:start bucket=%s key=%s size=%d content_type=%s",
+            self.bucket,
+            key,
+            size,
+            content_type,
+        )
         try:
-            self.client.upload_file(str(path), self.bucket, key)
+            self.client.upload_file(
+                str(path),
+                self.bucket,
+                key,
+                ExtraArgs={"ContentType": content_type, "ContentDisposition": "inline"},
+            )
             if self.public_base_url:
                 link = f"{self.public_base_url}/{key}"
                 link_type = "public"
@@ -55,10 +71,11 @@ class Storage:
                 )
                 link_type = "presigned"
             log.info(
-                "storage:upload:success bucket=%s key=%s link_type=%s elapsed=%.2fs",
+                "storage:upload:success bucket=%s key=%s link_type=%s content_type=%s elapsed=%.2fs",
                 self.bucket,
                 key,
                 link_type,
+                content_type,
                 time.monotonic() - started,
             )
             return link

@@ -7,3 +7,4 @@ __pycache__/
 downloads/
 tmp/
 data/*.db
+cookies/*.txt

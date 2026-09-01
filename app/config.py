@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     download_dir: Path = Path("./downloads")
     temp_dir: Path = Path("./tmp")
     database_path: Path = Path("./data/bot.db")
+    cookies_dir: Path = Path("./cookies")
     max_workers: int = 2
     max_active_jobs_per_user: int = 2
     max_file_size_mb: int = 2048

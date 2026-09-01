@@ -185,7 +185,6 @@ def build_app() -> Application:
         .token(settings.telegram_bot_token)
         .request(bot_request)
         .get_updates_request(updates_request)
-        .bootstrap_retries(5)
         .post_init(post_init)
         .build()
     )

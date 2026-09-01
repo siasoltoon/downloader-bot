@@ -2,8 +2,10 @@ import logging
 import mimetypes
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import boto3
+from botocore.config import Config
 
 log = logging.getLogger(__name__)
 
@@ -24,14 +26,33 @@ class Storage:
         self.bucket = bucket
         self.ttl = ttl
         self.public_base_url = public_base_url.rstrip("/")
-        self.region = region or "eu-west-1"
-        self.endpoint = endpoint
+        self.endpoint = endpoint.rstrip("/")
+        configured_region = (region or "eu-west-1").strip()
+        endpoint_host = (urlsplit(self.endpoint).hostname or "").lower()
+
+        # Filone's S3 endpoint uses a concrete regional gateway for signed
+        # object requests. Keep existing STORAGE_REGION=auto deployments
+        # compatible by signing those requests for the endpoint's region.
+        if configured_region == "auto" and endpoint_host.endswith(".s3.filonecontent.com"):
+            self.region = "eu-west-1"
+            log.info(
+                "storage:region_normalized configured=%s effective=%s reason=filone_s3_endpoint",
+                configured_region,
+                self.region,
+            )
+        else:
+            self.region = configured_region
+
         self.client = boto3.client(
             "s3",
-            endpoint_url=endpoint or None,
+            endpoint_url=self.endpoint or None,
             region_name=self.region,
             aws_access_key_id=access_key or None,
             aws_secret_access_key=secret_key or None,
+            config=Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "path"},
+            ),
         )
         log.info(
             "storage:init bucket=%s endpoint=%s region=%s presigned_ttl=%ss public_base_url=%s",
@@ -58,7 +79,10 @@ class Storage:
                 str(path),
                 self.bucket,
                 key,
-                ExtraArgs={"ContentType": content_type, "ContentDisposition": "inline"},
+                ExtraArgs={
+                    "ContentType": content_type,
+                    "ContentDisposition": "inline",
+                },
             )
             if self.public_base_url:
                 link = f"{self.public_base_url}/{key}"
@@ -70,6 +94,15 @@ class Storage:
                     ExpiresIn=self.ttl,
                 )
                 link_type = "presigned"
+                # Never log the signed URL: it contains authentication data.
+                log.info(
+                    "storage:presigned:created bucket=%s key=%s ttl=%ss endpoint=%s region=%s",
+                    self.bucket,
+                    key,
+                    self.ttl,
+                    self.endpoint,
+                    self.region,
+                )
             log.info(
                 "storage:upload:success bucket=%s key=%s link_type=%s content_type=%s elapsed=%.2fs",
                 self.bucket,

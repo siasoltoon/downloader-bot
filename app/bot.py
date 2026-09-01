@@ -10,6 +10,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 from app.config import settings
 from app.database import Database
@@ -165,13 +166,39 @@ async def post_init(app: Application):
 
 
 def build_app() -> Application:
-    app = Application.builder().token(settings.telegram_bot_token).post_init(post_init).build()
+    bot_request = HTTPXRequest(
+        connect_timeout=15.0,
+        read_timeout=30.0,
+        write_timeout=30.0,
+        pool_timeout=10.0,
+        connection_pool_size=16,
+    )
+    updates_request = HTTPXRequest(
+        connect_timeout=15.0,
+        read_timeout=30.0,
+        write_timeout=30.0,
+        pool_timeout=10.0,
+        connection_pool_size=16,
+    )
+    return (
+        Application.builder()
+        .token(settings.telegram_bot_token)
+        .request(bot_request)
+        .get_updates_request(updates_request)
+        .get_updates_read_timeout(30.0)
+        .get_updates_write_timeout(30.0)
+        .get_updates_connect_timeout(15.0)
+        .get_updates_pool_timeout(10.0)
+        .bootstrap_retries(5)
+        .post_init(post_init)
+        .build()
+    )
+
+
+def main():
+    app = build_app()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CallbackQueryHandler(choose, pattern=r"^fmt:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive))
-    return app
-
-
-def main():
-    build_app().run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES)

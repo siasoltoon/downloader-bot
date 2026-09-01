@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 
 import yt_dlp
 
+from app.config import settings
 from app.formats import collect_formats
 
 log = logging.getLogger(__name__)
@@ -12,7 +13,7 @@ log = logging.getLogger(__name__)
 
 def _host(url: str) -> str:
     try:
-        return (urlsplit(url).hostname or "unknown").lower()
+        return (urlsplit(url).hostname or "unknown").lower().removeprefix("www.")
     except ValueError:
         return "invalid"
 
@@ -21,18 +22,50 @@ def _is_finished_file(path: Path) -> bool:
     return path.is_file() and not path.name.endswith((".part", ".ytdl", ".tmp"))
 
 
+def _cookie_file_for_host(host: str) -> Path | None:
+    """Return the site-specific Netscape cookie file for a hostname, if present.
+
+    Cookie files are deliberately discovered from the runtime cookie directory and
+    are never bundled into the repository. A host such as www.example.com maps to
+    cookies/example.com.txt; the parent-domain fallback also supports subdomains.
+    """
+    if not host or host in {"unknown", "invalid"}:
+        return None
+
+    parts = host.split(".")
+    candidates = []
+    for index in range(len(parts) - 1):
+        candidates.append(".".join(parts[index:]))
+
+    for domain in candidates:
+        path = settings.cookies_dir / f"{domain}.txt"
+        if path.is_file():
+            return path
+    return None
+
+
+def _yt_dlp_opts(host: str) -> dict:
+    opts = {"quiet": True, "no_warnings": True, "noplaylist": True}
+    cookie_file = _cookie_file_for_host(host)
+    if cookie_file:
+        opts["cookiefile"] = str(cookie_file)
+        log.info("cookies:enabled host=%s file=%s", host, cookie_file.name)
+    return opts
+
+
 class Downloader:
     def __init__(self, download_dir: Path, temp_dir: Path):
         self.download_dir = download_dir
         self.temp_dir = temp_dir
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+        settings.cookies_dir.mkdir(parents=True, exist_ok=True)
 
     def inspect(self, url: str) -> dict:
         started = time.monotonic()
         host = _host(url)
         log.info("extract:start host=%s", host)
-        opts = {"quiet": True, "no_warnings": True, "noplaylist": True}
+        opts = _yt_dlp_opts(host)
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -65,7 +98,8 @@ class Downloader:
         job_dir = self.download_dir / str(job_id)
         job_dir.mkdir(parents=True, exist_ok=True)
         template = str(job_dir / "%(title).120s.%(ext)s")
-        opts = {
+        opts = _yt_dlp_opts(host)
+        opts.update({
             "format": format_expression,
             "outtmpl": template,
             "noplaylist": True,
@@ -76,9 +110,7 @@ class Downloader:
             "fragment_retries": 3,
             "continuedl": True,
             "overwrites": False,
-            "quiet": True,
-            "no_warnings": True,
-        }
+        })
         if progress_hook:
             opts["progress_hooks"] = [progress_hook]
         try:
@@ -89,9 +121,6 @@ class Downloader:
                 if _is_finished_file(p)
             ]
             if not matches:
-                # Some post-processors may leave the final artifact in the configured
-                # download directory rather than the job subdirectory. Search only
-                # for files associated with this job and never treat .part files as final.
                 matches = [
                     p for p in self.download_dir.rglob(f"{job_id}-*")
                     if _is_finished_file(p)

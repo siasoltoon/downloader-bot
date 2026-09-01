@@ -159,8 +159,6 @@ async def post_init(app: Application):
     _APP = app
     await DB.init()
     await DB.recover_interrupted_jobs()
-    for _ in range(max(1, settings.max_workers)):
-        app.create_task(worker())
     for job in await DB.list_queued_jobs():
         await _QUEUE.put(job["id"])
 
@@ -186,8 +184,18 @@ def build_app() -> Application:
         .request(bot_request)
         .get_updates_request(updates_request)
         .post_init(post_init)
+        .post_stop(post_stop)
         .build()
     )
+
+
+async def post_stop(app: Application):
+    tasks = list(getattr(app, "_tasks", ()))
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def main():

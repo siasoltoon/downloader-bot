@@ -17,6 +17,10 @@ def _host(url: str) -> str:
         return "invalid"
 
 
+def _is_finished_file(path: Path) -> bool:
+    return path.is_file() and not path.name.endswith((".part", ".ytdl", ".tmp"))
+
+
 class Downloader:
     def __init__(self, download_dir: Path, temp_dir: Path):
         self.download_dir = download_dir
@@ -58,14 +62,16 @@ class Downloader:
         started = time.monotonic()
         host = _host(url)
         log.info("download:start job=%s host=%s format=%s", job_id, host, format_expression)
-        template = str(self.download_dir / f"{job_id}-%(title).120s.%(ext)s")
+        job_dir = self.download_dir / str(job_id)
+        job_dir.mkdir(parents=True, exist_ok=True)
+        template = str(job_dir / "%(title).120s.%(ext)s")
         opts = {
             "format": format_expression,
             "outtmpl": template,
             "noplaylist": True,
             "restrictfilenames": True,
             "merge_output_format": "mp4",
-            "paths": {"home": str(self.download_dir), "temp": str(self.temp_dir)},
+            "paths": {"home": str(job_dir), "temp": str(self.temp_dir)},
             "retries": 3,
             "fragment_retries": 3,
             "continuedl": True,
@@ -78,14 +84,28 @@ class Downloader:
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
-            matches = sorted(
-                self.download_dir.glob(f"{job_id}-*"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
+            matches = [
+                p for p in job_dir.rglob("*")
+                if _is_finished_file(p)
+            ]
             if not matches:
+                # Some post-processors may leave the final artifact in the configured
+                # download directory rather than the job subdirectory. Search only
+                # for files associated with this job and never treat .part files as final.
+                matches = [
+                    p for p in self.download_dir.rglob(f"{job_id}-*")
+                    if _is_finished_file(p)
+                ]
+            if not matches:
+                log.error(
+                    "download:output_missing job=%s job_dir=%s files=%s temp_files=%s",
+                    job_id,
+                    job_dir,
+                    [p.name for p in job_dir.rglob("*")],
+                    [p.name for p in self.temp_dir.glob("*") if p.is_file()][:20],
+                )
                 raise RuntimeError("Download completed but output file was not found")
-            path = matches[0]
+            path = max(matches, key=lambda p: p.stat().st_mtime)
             log.info(
                 "download:success job=%s file=%s size=%d elapsed=%.2fs",
                 job_id,

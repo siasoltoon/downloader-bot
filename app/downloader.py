@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 import yt_dlp
 
 from app.config import settings
+from app.cookies import validate_netscape_cookie_file
 from app.formats import collect_formats
 
 log = logging.getLogger(__name__)
@@ -23,12 +24,7 @@ def _is_finished_file(path: Path) -> bool:
 
 
 def _cookie_file_for_host(host: str) -> Path | None:
-    """Return the site-specific Netscape cookie file for a hostname, if present.
-
-    Cookie files are deliberately discovered from the runtime cookie directory and
-    are never bundled into the repository. A host such as www.example.com maps to
-    cookies/example.com.txt; the parent-domain fallback also supports subdomains.
-    """
+    """Return the site-specific Netscape cookie file for a hostname, if present."""
     if not host or host in {"unknown", "invalid"}:
         return None
 
@@ -48,8 +44,25 @@ def _yt_dlp_opts(host: str) -> dict:
     opts = {"quiet": True, "no_warnings": True, "noplaylist": True}
     cookie_file = _cookie_file_for_host(host)
     if cookie_file:
-        opts["cookiefile"] = str(cookie_file)
-        log.info("cookies:enabled host=%s file=%s", host, cookie_file.name)
+        valid, reason, count = validate_netscape_cookie_file(cookie_file)
+        if valid:
+            opts["cookiefile"] = str(cookie_file)
+            log.info(
+                "cookies:enabled host=%s file=%s cookies=%d format=netscape",
+                host,
+                cookie_file.name,
+                count,
+            )
+        else:
+            log.warning(
+                "cookies:invalid host=%s file=%s reason=%s cookies=%d",
+                host,
+                cookie_file.name,
+                reason,
+                count,
+            )
+    else:
+        log.info("cookies:not_found host=%s", host)
     return opts
 
 
@@ -116,15 +129,9 @@ class Downloader:
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
-            matches = [
-                p for p in job_dir.rglob("*")
-                if _is_finished_file(p)
-            ]
+            matches = [p for p in job_dir.rglob("*") if _is_finished_file(p)]
             if not matches:
-                matches = [
-                    p for p in self.download_dir.rglob(f"{job_id}-*")
-                    if _is_finished_file(p)
-                ]
+                matches = [p for p in self.download_dir.rglob(f"{job_id}-*") if _is_finished_file(p)]
             if not matches:
                 log.error(
                     "download:output_missing job=%s job_dir=%s files=%s temp_files=%s",
